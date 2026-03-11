@@ -1271,6 +1271,238 @@ def list_campaigns() -> dict[str, list[dict]]:
     }
 
 
+def list_barometers_with_metrics() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+              b.id,
+              b.name,
+              b.year,
+              b.slug,
+              b.public_url,
+              b.description,
+              b.created_at,
+              COUNT(d.id) AS responses_count
+            FROM campaign_barometer b
+            LEFT JOIN data_barometer d ON d.barometer_id = b.id
+            WHERE b.is_active = 1
+            GROUP BY b.id, b.name, b.year, b.slug, b.public_url, b.description, b.created_at
+            ORDER BY b.year DESC, b.created_at DESC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def sanitize_segment_filters(raw: dict[str, str]) -> dict[str, str]:
+    allowed = {"sector", "tamano_empresa", "facturacion_2024"}
+    cleaned: dict[str, str] = {}
+    for key in allowed:
+        value = str(raw.get(key, "")).strip()
+        if value:
+            cleaned[key] = value
+    return cleaned
+
+
+def build_barometer_filter_where(barometer_id: str, filters: dict[str, str]) -> tuple[str, list[object]]:
+    conditions = ["barometer_id = ?"]
+    params: list[object] = [barometer_id]
+    for key in ["sector", "tamano_empresa", "facturacion_2024"]:
+        value = filters.get(key, "").strip()
+        if value:
+            conditions.append(f"{key} = ?")
+            params.append(value)
+    return " AND ".join(conditions), params
+
+
+def _barometer_distinct_values(barometer_id: str, column: str) -> list[str]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT {column}
+            FROM data_barometer
+            WHERE barometer_id = ? AND TRIM(COALESCE({column}, '')) <> ''
+            ORDER BY {column} ASC
+            """,
+            (barometer_id,),
+        ).fetchall()
+    return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+
+
+def _barometer_question_analytics(question: dict, parsed_rows: list[tuple[dict, int]]) -> dict:
+    qid = str(question["id"])
+    qtype = str(question.get("type", "single"))
+    options = [str(item) for item in question.get("options", [])]
+    distribution_counter: dict[str, int] = {}
+    answered_weight = 0
+    numeric_sum = 0.0
+    numeric_weight = 0
+
+    for answers, weight in parsed_rows:
+        if qid not in answers:
+            continue
+
+        raw_value = answers[qid]
+        if raw_value in {"", None} or raw_value == []:
+            continue
+
+        if qtype == "multiple":
+            items = raw_value if isinstance(raw_value, list) else [raw_value]
+            valid_items = [str(item).strip() for item in items if str(item).strip()]
+            if not valid_items:
+                continue
+            answered_weight += weight
+            for item in valid_items:
+                distribution_counter[item] = distribution_counter.get(item, 0) + weight
+            continue
+
+        label = answer_to_text(raw_value).strip()
+        if not label or label == "-":
+            continue
+        answered_weight += weight
+        distribution_counter[label] = distribution_counter.get(label, 0) + weight
+
+        if qtype == "scale" and not options:
+            numeric = parse_numeric(raw_value)
+            if numeric is not None:
+                numeric_sum += numeric * weight
+                numeric_weight += weight
+
+    sorted_distribution = sorted(distribution_counter.items(), key=lambda item: item[1], reverse=True)
+    mode_value = sorted_distribution[0][0] if sorted_distribution else "-"
+    mean_value: str | float = "-"
+    if numeric_weight > 0:
+        mean_value = round(numeric_sum / numeric_weight, 2)
+
+    distribution = []
+    for label, count in sorted_distribution[:12]:
+        pct = round((count / answered_weight) * 100, 1) if answered_weight > 0 else 0.0
+        distribution.append({"label": label, "count": count, "pct": pct})
+
+    return {
+        "qid": qid,
+        "title": str(question.get("title", qid)),
+        "type": qtype,
+        "answered_weight": answered_weight,
+        "mean": mean_value,
+        "mode": mode_value,
+        "distribution": distribution,
+    }
+
+
+def load_barometer_dashboard_payload(
+    barometer_id: str,
+    *,
+    filters: dict[str, str],
+    limit: int = 250,
+) -> tuple[dict, str]:
+    campaign = fetch_barometer_campaign_by_id(barometer_id)
+    if not campaign:
+        return {}, "Barometro no encontrado"
+
+    questions = campaign["questions"] if isinstance(campaign.get("questions"), list) else []
+    where_clause, params = build_barometer_filter_where(barometer_id, filters)
+    safe_limit = max(10, min(limit, 500))
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        total_responses = conn.execute(
+            "SELECT COUNT(1) FROM data_barometer WHERE barometer_id = ?",
+            (barometer_id,),
+        ).fetchone()[0]
+        filtered_responses = conn.execute(
+            f"SELECT COUNT(1) FROM data_barometer WHERE {where_clause}",
+            params,
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"""
+            SELECT id, created_at, sector, tamano_empresa, facturacion_2024, answers_json, sample_weight
+            FROM data_barometer
+            WHERE {where_clause}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            params + [safe_limit],
+        ).fetchall()
+        analytics_rows = conn.execute(
+            f"""
+            SELECT answers_json, sample_weight
+            FROM data_barometer
+            WHERE {where_clause}
+            """,
+            params,
+        ).fetchall()
+
+    parsed_rows_for_analytics: list[tuple[dict, int]] = []
+    for row in analytics_rows:
+        answers = json_loads_or_default(row["answers_json"], {})
+        if not isinstance(answers, dict):
+            continue
+        try:
+            weight = int(row["sample_weight"] or 1)
+        except (TypeError, ValueError):
+            weight = 1
+        parsed_rows_for_analytics.append((answers, max(weight, 1)))
+
+    analytics = [_barometer_question_analytics(question, parsed_rows_for_analytics) for question in questions]
+    analytics.sort(key=lambda item: item["title"].lower())
+
+    table_rows = []
+    for row in rows:
+        answers_raw = json_loads_or_default(row["answers_json"], {})
+        answers_out: dict[str, str] = {}
+        if isinstance(answers_raw, dict):
+            for question in questions:
+                qid = str(question["id"])
+                answers_out[qid] = answer_to_text(answers_raw.get(qid))
+
+        table_rows.append(
+            {
+                "id": row["id"],
+                "created_at": row["created_at"],
+                "sector": row["sector"] or "",
+                "tamano_empresa": row["tamano_empresa"] or "",
+                "facturacion_2024": row["facturacion_2024"] or "",
+                "answers": answers_out,
+            }
+        )
+
+    filters_options = {
+        "sector": _barometer_distinct_values(barometer_id, "sector"),
+        "tamano_empresa": _barometer_distinct_values(barometer_id, "tamano_empresa"),
+        "facturacion_2024": _barometer_distinct_values(barometer_id, "facturacion_2024"),
+    }
+
+    return {
+        "barometer": {
+            "id": campaign["id"],
+            "name": campaign["name"],
+            "year": campaign["year"],
+            "slug": campaign["slug"],
+            "public_url": campaign["public_url"],
+            "description": campaign.get("description", ""),
+        },
+        "questions": [
+            {
+                "id": str(question["id"]),
+                "title": str(question.get("title", question["id"])),
+                "type": str(question.get("type", "single")),
+            }
+            for question in questions
+        ],
+        "filters": filters,
+        "filters_options": filters_options,
+        "kpis": {
+            "total_responses": int(total_responses),
+            "filtered_responses": int(filtered_responses),
+            "shown_rows": len(table_rows),
+        },
+        "rows": table_rows,
+        "analytics": analytics,
+    }, ""
+
+
 def create_barometer_campaign(*, name: str, year: int, slug: str, description: str, questions: list[dict]) -> tuple[str, str]:
     campaign_id = uuid.uuid4().hex[:14]
     public_url = f"/barometro/{slug}"
@@ -3587,10 +3819,88 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
         )
 
     lead_engine_content = f"""
+      <section class="barometer-hub">
+        <article class="barometer-panel">
+          <p class="step-tag">Módulo A · Gestor de Barómetros</p>
+          <h2>Builder de Benchmark</h2>
+          <p class="helper">Crea formularios dinámicos (texto, selección única, múltiple o escala) y genera su URL pública al instante.</p>
+
+          <div class="barometer-builder-grid">
+            <label class="barometer-field">
+              <span>Nombre Barómetro</span>
+              <input id="barometerName" type="text" placeholder="Barómetro Alta Dirección 2027" />
+            </label>
+            <label class="barometer-field">
+              <span>Año</span>
+              <input id="barometerYear" type="number" min="2020" max="2100" value="2027" />
+            </label>
+            <label class="barometer-field">
+              <span>Slug (opcional)</span>
+              <input id="barometerSlug" type="text" placeholder="barometro-2027" />
+            </label>
+            <label class="barometer-field">
+              <span>Descripción</span>
+              <input id="barometerDescription" type="text" placeholder="Benchmark para comité de dirección" />
+            </label>
+          </div>
+
+          <div class="barometer-builder-head">
+            <h3>Preguntas del formulario</h3>
+            <button type="button" class="ghost-btn" id="addBarometerQuestionBtn">+ Añadir pregunta</button>
+          </div>
+          <div class="barometer-questions" id="barometerQuestions"></div>
+          <div class="barometer-builder-actions">
+            <button type="button" class="cta-btn" id="createBarometerBtn">Crear Barómetro + URL</button>
+            <p class="meta-line" id="barometerBuilderFeedback"></p>
+          </div>
+        </article>
+
+        <article class="barometer-panel">
+          <p class="step-tag">Explotación de datos</p>
+          <h2>Dashboard de Benchmark</h2>
+          <p class="helper">Tabla de respuestas crudas, filtros avanzados por segmentación y gráficos automáticos de distribución/media/moda.</p>
+
+          <div class="barometer-dashboard-controls">
+            <label class="barometer-field">
+              <span>Barómetro</span>
+              <select id="dashboardBarometerSelect"></select>
+            </label>
+            <label class="barometer-field">
+              <span>Sector</span>
+              <select id="filterSector"></select>
+            </label>
+            <label class="barometer-field">
+              <span>Tamaño</span>
+              <select id="filterTamano"></select>
+            </label>
+            <label class="barometer-field">
+              <span>Facturación</span>
+              <select id="filterFacturacion"></select>
+            </label>
+          </div>
+          <div class="barometer-dashboard-actions">
+            <button type="button" class="ghost-btn" id="applyBarometerFiltersBtn">Aplicar filtros</button>
+            <button type="button" class="ghost-btn" id="clearBarometerFiltersBtn">Limpiar</button>
+            <a class="workspace-refresh" href="/admin/leads" title="Abrir CRM">↗</a>
+          </div>
+
+          <div class="barometer-kpis" id="barometerKpis"></div>
+          <div class="barometer-charts" id="barometerCharts"></div>
+
+          <div class="workspace-table-wrap">
+            <table class="workspace-table" id="barometerResponsesTable">
+              <thead id="barometerResponsesHead"></thead>
+              <tbody id="barometerResponsesBody"></tbody>
+            </table>
+          </div>
+          <p class="meta-line" id="barometerDashboardFeedback"></p>
+        </article>
+      </section>
+
       <section class="workspace-filters">
         <label class="workspace-search">
-          <span>Buscar</span>
-          <input type="text" placeholder="Filtrado rapido (visual)." />
+          <span>Leads</span>
+          <input type="text" placeholder="Pipeline comercial del Flash Audit" />
         </label>
         <select class="workspace-select">
           <option>Leads ({lead_stats['total']})</option>
@@ -3602,9 +3912,8 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
           <option>Score medio: {lead_stats['avg_score']}</option>
         </select>
         <select class="workspace-select">
-          <option>Campanas activas: {len(list_campaigns().get('flash_audits', []))}</option>
+          <option>Campañas activas: {len(list_campaigns().get('flash_audits', []))}</option>
         </select>
-        <a class="workspace-refresh" href="/admin/leads" title="Abrir CRM">↗</a>
       </section>
 
       <section class="workspace-table-wrap">
@@ -3614,7 +3923,7 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
               <th>Origen</th>
               <th>Estado</th>
               <th>Fecha</th>
-              <th>Campana</th>
+              <th>Campaña</th>
               <th>Lead</th>
               <th>Alertas Rojas</th>
               <th>Abrir</th>
@@ -3863,8 +4172,478 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
   </script>
     """
 
+    lead_engine_script = """
+  <script>
+    (function () {
+      const questionsNode = document.getElementById("barometerQuestions");
+      if (!questionsNode) return;
+
+      const addQuestionBtn = document.getElementById("addBarometerQuestionBtn");
+      const createBarometerBtn = document.getElementById("createBarometerBtn");
+      const builderFeedback = document.getElementById("barometerBuilderFeedback");
+
+      const nameInput = document.getElementById("barometerName");
+      const yearInput = document.getElementById("barometerYear");
+      const slugInput = document.getElementById("barometerSlug");
+      const descInput = document.getElementById("barometerDescription");
+
+      const dashboardBarometerSelect = document.getElementById("dashboardBarometerSelect");
+      const filterSector = document.getElementById("filterSector");
+      const filterTamano = document.getElementById("filterTamano");
+      const filterFacturacion = document.getElementById("filterFacturacion");
+      const applyFiltersBtn = document.getElementById("applyBarometerFiltersBtn");
+      const clearFiltersBtn = document.getElementById("clearBarometerFiltersBtn");
+      const dashboardFeedback = document.getElementById("barometerDashboardFeedback");
+      const kpisNode = document.getElementById("barometerKpis");
+      const chartsNode = document.getElementById("barometerCharts");
+      const tableHead = document.getElementById("barometerResponsesHead");
+      const tableBody = document.getElementById("barometerResponsesBody");
+
+      let editorQuestions = [];
+      let questionCounter = 0;
+      let barometers = [];
+
+      function esc(text) {
+        return String(text || "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function slugify(text) {
+        return String(text || "")
+          .normalize("NFD")
+          .replace(/[\\u0300-\\u036f]/g, "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "_")
+          .replace(/^_+|_+$/g, "")
+          .slice(0, 42);
+      }
+
+      function setBuilderFeedback(message, ok) {
+        builderFeedback.textContent = message || "";
+        builderFeedback.style.color = ok ? "#2f7c54" : "#b53f34";
+      }
+
+      function setDashboardFeedback(message, ok) {
+        dashboardFeedback.textContent = message || "";
+        dashboardFeedback.style.color = ok ? "#2f7c54" : "#b53f34";
+      }
+
+      function newQuestion() {
+        questionCounter += 1;
+        return {
+          localId: "q" + questionCounter,
+          title: "",
+          type: "single",
+          required: true,
+          segment_key: "",
+          direction: "higher_better",
+          optionsText: "",
+          min: "1",
+          max: "5"
+        };
+      }
+
+      function addDefaultQuestions() {
+        editorQuestions = [
+          {
+            localId: "q_seg_sector",
+            title: "Sector",
+            type: "single",
+            required: true,
+            segment_key: "sector",
+            direction: "higher_better",
+            optionsText: "Tecnologia\\nIndustrial\\nRetail\\nServicios Profesionales",
+            min: "1",
+            max: "5"
+          },
+          {
+            localId: "q_seg_tamano",
+            title: "Tamaño empresa",
+            type: "single",
+            required: true,
+            segment_key: "tamano_empresa",
+            direction: "higher_better",
+            optionsText: "<10\\n10-49\\n50-99\\n100-250\\n>250 personas",
+            min: "1",
+            max: "5"
+          },
+          {
+            localId: "q_seg_facturacion",
+            title: "Facturación 2024",
+            type: "single",
+            required: true,
+            segment_key: "facturacion_2024",
+            direction: "higher_better",
+            optionsText: "<20 MEUR\\n20-50 MEUR\\n50-100 MEUR\\n100-250 MEUR\\n>250 MEUR",
+            min: "1",
+            max: "5"
+          },
+          {
+            localId: "q_ndt",
+            title: "Tiempo neto de decisión",
+            type: "single",
+            required: true,
+            segment_key: "",
+            direction: "lower_better",
+            optionsText: "<= 2 dias\\n3-7 dias\\n8-14 dias\\n15-30 dias\\n>30 dias",
+            min: "1",
+            max: "5"
+          }
+        ];
+        questionCounter = 20;
+      }
+
+      function renderQuestionEditor() {
+        questionsNode.innerHTML = editorQuestions
+          .map((question, index) => {
+            const isScale = question.type === "scale";
+            const needsOptions = question.type === "single" || question.type === "multiple" || (isScale && question.optionsText.trim());
+            return `
+              <article class="barometer-question-card">
+                <div class="barometer-question-head">
+                  <h4>Pregunta ${index + 1}</h4>
+                  <button type="button" class="ghost-btn" data-remove="${esc(question.localId)}">Eliminar</button>
+                </div>
+                <div class="barometer-builder-grid">
+                  <label class="barometer-field">
+                    <span>Título</span>
+                    <input type="text" data-field="title" data-id="${esc(question.localId)}" value="${esc(question.title)}" />
+                  </label>
+                  <label class="barometer-field">
+                    <span>Tipo</span>
+                    <select data-field="type" data-id="${esc(question.localId)}">
+                      <option value="text" ${question.type === "text" ? "selected" : ""}>Texto</option>
+                      <option value="single" ${question.type === "single" ? "selected" : ""}>Selección Única</option>
+                      <option value="multiple" ${question.type === "multiple" ? "selected" : ""}>Selección Múltiple</option>
+                      <option value="scale" ${question.type === "scale" ? "selected" : ""}>Escala numérica</option>
+                    </select>
+                  </label>
+                  <label class="barometer-field">
+                    <span>Segmentación</span>
+                    <select data-field="segment_key" data-id="${esc(question.localId)}">
+                      <option value="" ${question.segment_key === "" ? "selected" : ""}>No segmenta</option>
+                      <option value="sector" ${question.segment_key === "sector" ? "selected" : ""}>Sector</option>
+                      <option value="tamano_empresa" ${question.segment_key === "tamano_empresa" ? "selected" : ""}>Tamaño</option>
+                      <option value="facturacion_2024" ${question.segment_key === "facturacion_2024" ? "selected" : ""}>Facturación</option>
+                    </select>
+                  </label>
+                  <label class="barometer-field">
+                    <span>Dirección</span>
+                    <select data-field="direction" data-id="${esc(question.localId)}">
+                      <option value="higher_better" ${question.direction === "higher_better" ? "selected" : ""}>Higher Better</option>
+                      <option value="lower_better" ${question.direction === "lower_better" ? "selected" : ""}>Lower Better</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="barometer-builder-grid">
+                  <label class="barometer-field">
+                    <span>Opciones (1 por línea)</span>
+                    <textarea data-field="optionsText" data-id="${esc(question.localId)}" placeholder="${isScale ? "Opcional para escala categórica" : "Obligatorio para selección"}">${esc(question.optionsText)}</textarea>
+                  </label>
+                  <label class="barometer-field">
+                    <span>Mín (solo escala numérica)</span>
+                    <input type="number" data-field="min" data-id="${esc(question.localId)}" value="${esc(question.min)}" />
+                  </label>
+                  <label class="barometer-field">
+                    <span>Máx (solo escala numérica)</span>
+                    <input type="number" data-field="max" data-id="${esc(question.localId)}" value="${esc(question.max)}" />
+                  </label>
+                  <label class="barometer-field barometer-field-check">
+                    <input type="checkbox" data-field="required" data-id="${esc(question.localId)}" ${question.required ? "checked" : ""} />
+                    <span>Respuesta obligatoria</span>
+                  </label>
+                </div>
+                <p class="meta-line">${needsOptions ? "Se usarán opciones para calcular distribución y moda." : "Pregunta abierta (sin distribución categórica)."}</p>
+              </article>
+            `;
+          })
+          .join("");
+
+        questionsNode.querySelectorAll("[data-remove]").forEach((node) => {
+          node.addEventListener("click", () => {
+            const id = node.getAttribute("data-remove");
+            editorQuestions = editorQuestions.filter((question) => question.localId !== id);
+            renderQuestionEditor();
+          });
+        });
+
+        questionsNode.querySelectorAll("[data-field]").forEach((node) => {
+          node.addEventListener("input", updateQuestionFromField);
+          node.addEventListener("change", updateQuestionFromField);
+        });
+      }
+
+      function updateQuestionFromField(event) {
+        const id = event.target.getAttribute("data-id");
+        const field = event.target.getAttribute("data-field");
+        const question = editorQuestions.find((item) => item.localId === id);
+        if (!question || !field) return;
+
+        if (field === "required") {
+          question.required = !!event.target.checked;
+        } else {
+          question[field] = event.target.value;
+        }
+      }
+
+      function compileQuestions() {
+        const compiled = [];
+        for (let i = 0; i < editorQuestions.length; i += 1) {
+          const source = editorQuestions[i];
+          const title = String(source.title || "").trim();
+          if (!title) throw new Error(`La pregunta ${i + 1} necesita título.`);
+
+          const qid = slugify(source.localId || source.title || ("q_" + (i + 1))) || ("q_" + (i + 1));
+          const type = source.type || "single";
+          const question = {
+            id: qid,
+            title,
+            type,
+            required: !!source.required,
+            direction: source.direction || "higher_better",
+            segment_key: source.segment_key || ""
+          };
+
+          const options = String(source.optionsText || "")
+            .split("\\n")
+            .map((item) => item.trim())
+            .filter(Boolean);
+
+          if (type === "single" || type === "multiple") {
+            if (!options.length) throw new Error(`La pregunta ${i + 1} requiere opciones.`);
+            question.options = options;
+          } else if (type === "scale") {
+            if (options.length) {
+              question.options = options;
+            } else {
+              const min = Number(source.min || "1");
+              const max = Number(source.max || "5");
+              if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
+                throw new Error(`Escala inválida en pregunta ${i + 1}.`);
+              }
+              question.min = min;
+              question.max = max;
+            }
+          }
+
+          if (question.segment_key) {
+            question.compare = false;
+          } else {
+            question.compare = type !== "text" && type !== "multiple";
+          }
+
+          compiled.push(question);
+        }
+        if (!compiled.length) throw new Error("Añade al menos una pregunta.");
+        return compiled;
+      }
+
+      function fillSelect(select, values, selectedValue) {
+        if (!select) return;
+        const options = ['<option value="">Todos</option>']
+          .concat((values || []).map((value) => `<option value="${esc(value)}" ${selectedValue === value ? "selected" : ""}>${esc(value)}</option>`));
+        select.innerHTML = options.join("");
+      }
+
+      function renderKpis(kpis) {
+        if (!kpisNode) return;
+        if (!kpis) {
+          kpisNode.innerHTML = "";
+          return;
+        }
+        kpisNode.innerHTML = `
+          <article><p>Total respuestas</p><h3>${esc(kpis.total_responses || 0)}</h3></article>
+          <article><p>Filtradas</p><h3>${esc(kpis.filtered_responses || 0)}</h3></article>
+          <article><p>Mostradas</p><h3>${esc(kpis.shown_rows || 0)}</h3></article>
+        `;
+      }
+
+      function renderAnalytics(analytics) {
+        if (!chartsNode) return;
+        if (!Array.isArray(analytics) || !analytics.length) {
+          chartsNode.innerHTML = '<p class="meta-line">Sin datos para generar analítica.</p>';
+          return;
+        }
+
+        chartsNode.innerHTML = analytics
+          .map((item) => {
+            const bars = (item.distribution || [])
+              .slice(0, 5)
+              .map((bucket) => `
+                <div class="barometer-bar-row">
+                  <span>${esc(bucket.label)}</span>
+                  <div class="barometer-bar-track"><span style="width:${Math.min(100, Number(bucket.pct || 0))}%"></span></div>
+                  <strong>${esc(bucket.count)}</strong>
+                </div>
+              `)
+              .join("");
+            return `
+              <article class="barometer-analytics-card">
+                <h3>${esc(item.title || item.qid)}</h3>
+                <p class="meta-line">Moda: <strong>${esc(item.mode || "-")}</strong> · Media: <strong>${esc(item.mean)}</strong></p>
+                <div class="barometer-bars">${bars || '<p class="meta-line">Sin distribución.</p>'}</div>
+              </article>
+            `;
+          })
+          .join("");
+      }
+
+      function renderResponsesTable(payload) {
+        const questions = payload.questions || [];
+        const rows = payload.rows || [];
+        tableHead.innerHTML = `
+          <tr>
+            <th>Fecha</th>
+            <th>Sector</th>
+            <th>Tamaño</th>
+            <th>Facturación</th>
+            ${questions.map((q) => `<th>${esc(q.title)}</th>`).join("")}
+          </tr>
+        `;
+
+        if (!rows.length) {
+          tableBody.innerHTML = `<tr><td colspan="${4 + questions.length}">Sin respuestas para este filtro.</td></tr>`;
+          return;
+        }
+
+        tableBody.innerHTML = rows
+          .map((row) => `
+            <tr>
+              <td>${esc(row.created_at || "-")}</td>
+              <td>${esc(row.sector || "-")}</td>
+              <td>${esc(row.tamano_empresa || "-")}</td>
+              <td>${esc(row.facturacion_2024 || "-")}</td>
+              ${questions.map((q) => `<td>${esc((row.answers || {})[q.id] || "-")}</td>`).join("")}
+            </tr>
+          `)
+          .join("");
+      }
+
+      async function loadBarometers() {
+        const response = await fetch("/api/admin/barometers");
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "No se pudo cargar la lista de barómetros");
+        barometers = data.barometers || [];
+        dashboardBarometerSelect.innerHTML = barometers
+          .map((item) => `<option value="${esc(item.id)}">${esc(item.name)} (${esc(item.year)}) · ${esc(item.responses_count || 0)} resp.</option>`)
+          .join("");
+      }
+
+      async function loadDashboard() {
+        if (!dashboardBarometerSelect.value) {
+          setDashboardFeedback("No hay barómetros para analizar todavía.", false);
+          renderKpis(null);
+          chartsNode.innerHTML = "";
+          tableHead.innerHTML = "";
+          tableBody.innerHTML = "";
+          return;
+        }
+
+        const params = new URLSearchParams();
+        params.set("barometer_id", dashboardBarometerSelect.value);
+        if (filterSector.value) params.set("sector", filterSector.value);
+        if (filterTamano.value) params.set("tamano_empresa", filterTamano.value);
+        if (filterFacturacion.value) params.set("facturacion_2024", filterFacturacion.value);
+        params.set("limit", "250");
+
+        const response = await fetch("/api/admin/barometers/dashboard?" + params.toString());
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "No se pudo cargar el dashboard");
+        if (!data.data) {
+          setDashboardFeedback("Sin datos disponibles para este barómetro.", false);
+          return;
+        }
+
+        const payload = data.data;
+        fillSelect(filterSector, payload.filters_options.sector, payload.filters.sector || "");
+        fillSelect(filterTamano, payload.filters_options.tamano_empresa, payload.filters.tamano_empresa || "");
+        fillSelect(filterFacturacion, payload.filters_options.facturacion_2024, payload.filters.facturacion_2024 || "");
+
+        renderKpis(payload.kpis);
+        renderAnalytics(payload.analytics);
+        renderResponsesTable(payload);
+        const publicUrl = window.location.origin + (payload.barometer.public_url || "");
+        setDashboardFeedback(`URL pública: ${publicUrl}`, true);
+      }
+
+      async function createBarometer() {
+        setBuilderFeedback("", false);
+        const name = String(nameInput.value || "").trim();
+        if (!name) {
+          setBuilderFeedback("El nombre del barómetro es obligatorio.", false);
+          return;
+        }
+
+        let questions;
+        try {
+          questions = compileQuestions();
+        } catch (error) {
+          setBuilderFeedback(error.message || "No se pudo validar el formulario.", false);
+          return;
+        }
+
+        const payload = {
+          name,
+          year: Number(yearInput.value || "2027"),
+          slug: String(slugInput.value || "").trim(),
+          description: String(descInput.value || "").trim(),
+          questions
+        };
+
+        const response = await fetch("/api/admin/barometers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          setBuilderFeedback(data.error || "No se pudo crear el barómetro.", false);
+          return;
+        }
+
+        const publicUrl = window.location.origin + (data.public_url || "");
+        setBuilderFeedback("Barómetro creado correctamente. URL pública: " + publicUrl, true);
+        await loadBarometers();
+        dashboardBarometerSelect.value = data.barometer_id;
+        await loadDashboard();
+      }
+
+      addQuestionBtn.addEventListener("click", () => {
+        editorQuestions.push(newQuestion());
+        renderQuestionEditor();
+      });
+
+      createBarometerBtn.addEventListener("click", createBarometer);
+      dashboardBarometerSelect.addEventListener("change", loadDashboard);
+      applyFiltersBtn.addEventListener("click", loadDashboard);
+      clearFiltersBtn.addEventListener("click", () => {
+        filterSector.value = "";
+        filterTamano.value = "";
+        filterFacturacion.value = "";
+        loadDashboard();
+      });
+
+      addDefaultQuestions();
+      renderQuestionEditor();
+      loadBarometers()
+        .then(() => loadDashboard())
+        .catch((error) => {
+          setDashboardFeedback(error.message || "No se pudo inicializar el módulo de barómetros.", false);
+        });
+    })();
+  </script>
+    """
+
     module_content = inside_scope_content if module_slug == "inside-scope" else lead_engine_content
-    module_script = inside_scope_script if module_slug == "inside-scope" else ""
+    module_script = ""
+    if module_slug == "inside-scope":
+        module_script = inside_scope_script
+    elif module_slug == "lead-engine":
+        module_script = lead_engine_script
     module_kpis = ""
 
     doc = f"""<!doctype html>
@@ -4724,6 +5503,51 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             payload = {"ok": True, "campaigns": list_campaigns()}
             json_response(self, payload, 200)
+            return
+
+        if path == "/api/admin/barometers":
+            if not is_admin_authenticated(self):
+                json_response(self, {"ok": False, "error": "No autenticado"}, 401)
+                return
+            barometers = list_barometers_with_metrics()
+            json_response(self, {"ok": True, "barometers": barometers}, 200)
+            return
+
+        if path == "/api/admin/barometers/dashboard":
+            if not is_admin_authenticated(self):
+                json_response(self, {"ok": False, "error": "No autenticado"}, 401)
+                return
+
+            query = parse_qs(parsed.query)
+            barometer_id = str(query.get("barometer_id", [""])[0]).strip()
+            if not barometer_id:
+                barometers = list_barometers_with_metrics()
+                if not barometers:
+                    json_response(self, {"ok": True, "data": None}, 200)
+                    return
+                barometer_id = str(barometers[0]["id"])
+
+            try:
+                limit = int(str(query.get("limit", ["250"])[0]).strip() or "250")
+            except ValueError:
+                limit = 250
+
+            filters = sanitize_segment_filters(
+                {
+                    "sector": str(query.get("sector", [""])[0]),
+                    "tamano_empresa": str(query.get("tamano_empresa", [""])[0]),
+                    "facturacion_2024": str(query.get("facturacion_2024", [""])[0]),
+                }
+            )
+            payload, error = load_barometer_dashboard_payload(
+                barometer_id,
+                filters=filters,
+                limit=limit,
+            )
+            if error:
+                json_response(self, {"ok": False, "error": error}, 404)
+                return
+            json_response(self, {"ok": True, "data": payload}, 200)
             return
 
         if path == "/api/admin/leads":

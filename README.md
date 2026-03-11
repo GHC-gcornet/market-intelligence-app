@@ -60,6 +60,8 @@ Publicos:
 Admin (requieren sesion):
 
 - `GET /api/admin/campaigns`
+- `GET /api/admin/barometers`
+- `GET /api/admin/barometers/dashboard`
 - `GET /api/admin/leads`
 - `POST /api/admin/barometers`
 - `POST /api/admin/flash-audits`

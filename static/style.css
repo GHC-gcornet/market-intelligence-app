@@ -954,6 +954,206 @@ body {
   background: #ffffff;
 }
 
+.barometer-hub {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+
+.barometer-panel {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: #ffffff;
+  padding: 18px;
+  box-shadow: 0 12px 26px rgba(13, 27, 42, 0.05);
+}
+
+.barometer-panel h2 {
+  margin: 2px 0 8px;
+  font-size: clamp(1.35rem, 2vw, 1.7rem);
+}
+
+.barometer-builder-grid,
+.barometer-dashboard-controls {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.barometer-field {
+  display: grid;
+  gap: 6px;
+}
+
+.barometer-field span {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.74rem;
+  color: #7e91a8;
+  font-family: var(--font-heading);
+  font-weight: 700;
+}
+
+.barometer-field input,
+.barometer-field select,
+.barometer-field textarea {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 10px;
+  font: inherit;
+  color: var(--ink);
+  background: #ffffff;
+}
+
+.barometer-field textarea {
+  min-height: 94px;
+  resize: vertical;
+}
+
+.barometer-field input:focus,
+.barometer-field select:focus,
+.barometer-field textarea:focus {
+  outline: 2px solid rgba(13, 27, 42, 0.11);
+  border-color: #9fb1c7;
+}
+
+.barometer-field-check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-top: 18px;
+}
+
+.barometer-field-check input {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+}
+
+.barometer-builder-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.barometer-builder-head h3 {
+  margin: 0;
+  font-size: 1.08rem;
+}
+
+.barometer-questions {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.barometer-question-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+  background: #fcfdff;
+}
+
+.barometer-question-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.barometer-question-head h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.barometer-builder-actions,
+.barometer-dashboard-actions {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.barometer-kpis {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.barometer-kpis article {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 10px 12px;
+}
+
+.barometer-kpis p {
+  margin: 0;
+  color: #7388a0;
+  font-size: 0.8rem;
+}
+
+.barometer-kpis h3 {
+  margin-top: 4px;
+  font-size: 1.46rem;
+}
+
+.barometer-charts {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.barometer-analytics-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.barometer-analytics-card h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+.barometer-bars {
+  display: grid;
+  gap: 6px;
+}
+
+.barometer-bar-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.84rem;
+  color: #4b6079;
+}
+
+.barometer-bar-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: #edf2f8;
+  overflow: hidden;
+}
+
+.barometer-bar-track span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #0d1b2a 0%, #3f5f82 100%);
+}
+
 h1,
 h2,
 h3,
@@ -1492,6 +1692,16 @@ th {
     grid-template-columns: 1fr 1fr;
   }
 
+  .barometer-builder-grid,
+  .barometer-dashboard-controls,
+  .barometer-charts {
+    grid-template-columns: 1fr;
+  }
+
+  .barometer-kpis {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+
   .workspace-search {
     grid-column: 1 / -1;
   }
@@ -1603,6 +1813,10 @@ th {
   }
 
   .workspace-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .barometer-kpis {
     grid-template-columns: 1fr;
   }
 

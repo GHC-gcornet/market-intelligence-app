@@ -2399,16 +2399,20 @@ def redirect_response(handler: BaseHTTPRequestHandler, location: str) -> None:
 
 
 def create_admin_session(email: str) -> str:
-    raw = f"{uuid.uuid4().hex}:{time.time()}".encode("utf-8")
-    token = hmac.new(SESSION_SECRET.encode("utf-8"), raw, hashlib.sha256).hexdigest()
-    ADMIN_SESSIONS[token] = {
-        "exp": time.time() + SESSION_TTL_SECONDS,
-        "email": email.strip().lower(),
-    }
-    return token
+    normalized = (email or "").strip().lower()
+    exp = int(time.time() + SESSION_TTL_SECONDS)
+    payload = f"{normalized}|{exp}"
+    signature = hmac.new(
+        SESSION_SECRET.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    raw = f"{payload}|{signature}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 def prune_sessions() -> None:
+    # Legacy in-memory sessions kept only for backward compatibility in local runs.
     ts = time.time()
     for token in list(ADMIN_SESSIONS.keys()):
         session = ADMIN_SESSIONS[token]
@@ -2428,20 +2432,59 @@ def get_session_token(handler: BaseHTTPRequestHandler) -> str | None:
     return morsel.value if morsel else None
 
 
+def decode_admin_session(token: str | None) -> dict[str, str] | None:
+    raw_token = (token or "").strip()
+    if not raw_token:
+        return None
+
+    padded = raw_token + "=" * (-len(raw_token) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    except Exception:
+        return None
+
+    parts = decoded.split("|")
+    if len(parts) != 3:
+        return None
+
+    email, exp_raw, signature = parts
+    payload = f"{email}|{exp_raw}"
+    expected_signature = hmac.new(
+        SESSION_SECRET.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        return None
+
+    try:
+        exp = int(exp_raw)
+    except ValueError:
+        return None
+
+    if exp <= int(time.time()):
+        return None
+
+    return {"email": email.strip().lower(), "exp": str(exp)}
+
+
 def is_admin_authenticated(handler: BaseHTTPRequestHandler) -> bool:
     prune_sessions()
     token = get_session_token(handler)
     if not token:
         return False
 
-    session = ADMIN_SESSIONS.get(token)
-    if not session:
+    session = decode_admin_session(token)
+    if session:
+        return True
+
+    # Backward compatibility for tokens generated before stateless cookies.
+    legacy = ADMIN_SESSIONS.get(token)
+    if not legacy:
         return False
-
-    if isinstance(session, float):
-        return session > time.time()
-
-    return float(session.get("exp", 0)) > time.time()
+    if isinstance(legacy, float):
+        return legacy > time.time()
+    return float(legacy.get("exp", 0)) > time.time()
 
 
 def current_admin_email(handler: BaseHTTPRequestHandler) -> str:
@@ -2449,12 +2492,14 @@ def current_admin_email(handler: BaseHTTPRequestHandler) -> str:
     if not token:
         return ""
 
-    session = ADMIN_SESSIONS.get(token)
-    if not isinstance(session, dict):
-        return ""
+    session = decode_admin_session(token)
+    if session:
+        return str(session.get("email", "")).strip().lower()
 
-    email = str(session.get("email", "")).strip().lower()
-    return email
+    legacy = ADMIN_SESSIONS.get(token)
+    if not isinstance(legacy, dict):
+        return ""
+    return str(legacy.get("email", "")).strip().lower()
 
 
 def consultant_display_name(email: str) -> str:

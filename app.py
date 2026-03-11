@@ -52,9 +52,9 @@ ADMIN_SESSIONS: dict[str, dict[str, str | float] | float] = {}
 BOOTSTRAPPED = False
 
 # Minimal credential store for admin login.
-# Default password for the single admin user is 123456 unless overridden via GCORNET_PASSWORD.
+# Single admin credential (fixed by product requirement).
 ADMIN_USERS = {
-    "gcornet@globalhumancon.com": os.getenv("GCORNET_PASSWORD", "123456"),
+    "gcornet@globalhumancon.com": "123456",
 }
 
 INSIDE_SCOPE_AREA_LEVEL_OPTIONS = [

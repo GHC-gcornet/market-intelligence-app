@@ -115,3 +115,16 @@ curl -X POST http://localhost:8000/api/admin/flash-audits \
   - `yellow`: igual
   - `red`: peor
 - Si no hay match exacto por segmento, hace fallback (sector+tamaño, sector, global).
+
+## Deploy en Vercel
+
+Este repo ya incluye:
+
+- `api/index.py` (entrypoint serverless Python)
+- `vercel.json` (rewrite global a la funcion Python)
+
+Puntos importantes en Vercel:
+
+- La app usa SQLite en `/tmp/results.db` cuando detecta entorno Vercel.
+- `/tmp` es efimero: los datos y sesiones admin no son persistentes entre reinicios/cold starts.
+- Para produccion, mueve persistencia a una DB gestionada (Supabase/Postgres/MySQL).

@@ -28,7 +28,8 @@ from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "results.db"
+IS_VERCEL = bool(os.getenv("VERCEL"))
+DB_PATH = Path("/tmp/results.db") if IS_VERCEL else (BASE_DIR / "results.db")
 CONFIG_PATH = BASE_DIR / "barometer_config.json"
 SEGMENT_DATA_PATH = BASE_DIR / "segment_benchmarks.csv"
 STYLE_PATH = BASE_DIR / "static" / "style.css"
@@ -48,6 +49,7 @@ GEMINI_TRANSCRIBE_MODEL = os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.0-flash
 GEMINI_EXTRACT_MODEL = os.getenv("GEMINI_EXTRACT_MODEL", "gemini-2.0-flash").strip()
 
 ADMIN_SESSIONS: dict[str, dict[str, str | float] | float] = {}
+BOOTSTRAPPED = False
 
 # Minimal credential store for admin login.
 # The requested user uses the same password as ADMIN_PASSWORD unless overridden.
@@ -269,6 +271,15 @@ def init_db() -> None:
             ON leads_flash_audit (flash_audit_id, created_at DESC)
             """
         )
+
+
+def ensure_bootstrap() -> None:
+    global BOOTSTRAPPED
+    if BOOTSTRAPPED:
+        return
+    init_db()
+    seed_default_campaigns()
+    BOOTSTRAPPED = True
 
 
 def option_index(question: dict, option: str) -> int:
@@ -4022,6 +4033,7 @@ def admin_create_flash_audit(payload: dict) -> tuple[dict, int]:
 
 class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        ensure_bootstrap()
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -4212,6 +4224,7 @@ class AppHandler(BaseHTTPRequestHandler):
         html_response(self, base_layout("No encontrado", "", '<section class="panel">Ruta no valida.</section>'), 404)
 
     def do_POST(self) -> None:
+        ensure_bootstrap()
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -4456,8 +4469,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 def run() -> None:
-    init_db()
-    seed_default_campaigns()
+    ensure_bootstrap()
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
 

@@ -45,6 +45,7 @@ Rutas principales:
 
 - Login: `http://localhost:8000/login`
 - Workspace: `http://localhost:8000/app`
+- Mi Perfil: `http://localhost:8000/app/profile`
 - CRM leads: `http://localhost:8000/admin/leads`
 - Barometro demo: `http://localhost:8000/barometro/barometro-2026`
 - Flash demo: `http://localhost:8000/flash-audit/flash-audit-general`

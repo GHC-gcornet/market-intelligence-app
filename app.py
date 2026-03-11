@@ -52,9 +52,9 @@ ADMIN_SESSIONS: dict[str, dict[str, str | float] | float] = {}
 BOOTSTRAPPED = False
 
 # Minimal credential store for admin login.
-# The requested user uses the same password as ADMIN_PASSWORD unless overridden.
+# Default password for the single admin user is 123456 unless overridden via GCORNET_PASSWORD.
 ADMIN_USERS = {
-    "gcornet@globalhumancon.com": os.getenv("GCORNET_PASSWORD", ADMIN_PASSWORD),
+    "gcornet@globalhumancon.com": os.getenv("GCORNET_PASSWORD", "123456"),
 }
 
 INSIDE_SCOPE_AREA_LEVEL_OPTIONS = [
@@ -119,6 +119,14 @@ SEGMENT_FIELD_KEYS = ("sector", "tamano_empresa", "facturacion_2024")
 CAMPAIGN_QUESTION_TYPES = {"text", "single", "multiple", "scale"}
 DEFAULT_BAROMETER_SLUG = "barometro-2026"
 DEFAULT_FLASH_AUDIT_SLUG = "flash-audit-general"
+PASSWORD_HASH_ITERATIONS = 260000
+DEFAULT_ADMIN_ROLE = "Consultor"
+ADMIN_ROLE_BY_EMAIL = {
+    "gcornet@globalhumancon.com": "CEO",
+}
+ADMIN_NAME_BY_EMAIL = {
+    "gcornet@globalhumancon.com": "Guillermo Cornet",
+}
 
 
 def load_segment_rows() -> list[dict]:
@@ -271,6 +279,18 @@ def init_db() -> None:
             ON leads_flash_audit (flash_audit_id, created_at DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_user_profiles (
+                email TEXT PRIMARY KEY,
+                full_name TEXT NOT NULL,
+                role_title TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 def ensure_bootstrap() -> None:
@@ -278,8 +298,228 @@ def ensure_bootstrap() -> None:
     if BOOTSTRAPPED:
         return
     init_db()
+    seed_admin_profiles()
     seed_default_campaigns()
     BOOTSTRAPPED = True
+
+
+def admin_profile_defaults(email: str) -> tuple[str, str]:
+    normalized = (email or "").strip().lower()
+    full_name = ADMIN_NAME_BY_EMAIL.get(normalized, consultant_display_name(normalized))
+    role = ADMIN_ROLE_BY_EMAIL.get(normalized, DEFAULT_ADMIN_ROLE)
+    return full_name, role
+
+
+def hash_password(password: str) -> str:
+    salt = os.urandom(16).hex()
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, rounds_raw, salt, expected = (encoded or "").split("$", 3)
+    except ValueError:
+        return False
+
+    if algorithm != "pbkdf2_sha256":
+        return False
+
+    try:
+        rounds = int(rounds_raw)
+    except ValueError:
+        return False
+
+    try:
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt),
+            rounds,
+        ).hex()
+    except ValueError:
+        return False
+
+    return hmac.compare_digest(digest, expected)
+
+
+def fetch_admin_profile_row(email: str) -> sqlite3.Row | None:
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT email, full_name, role_title, password_hash, created_at, updated_at
+            FROM admin_user_profiles
+            WHERE email = ?
+            """,
+            (normalized,),
+        ).fetchone()
+    return row
+
+
+def ensure_admin_profile(email: str, default_password: str) -> dict:
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return {}
+
+    row = fetch_admin_profile_row(normalized)
+    if row:
+        return dict(row)
+
+    full_name, role_title = admin_profile_defaults(normalized)
+    now = now_iso()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO admin_user_profiles (
+              email, full_name, role_title, password_hash, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized,
+                full_name,
+                role_title,
+                hash_password(default_password),
+                now,
+                now,
+            ),
+        )
+
+    row = fetch_admin_profile_row(normalized)
+    return dict(row) if row else {}
+
+
+def seed_admin_profiles() -> None:
+    for email, password in ADMIN_USERS.items():
+        normalized = (email or "").strip().lower()
+        row = ensure_admin_profile(normalized, str(password))
+        if not row:
+            continue
+
+        desired_name = ADMIN_NAME_BY_EMAIL.get(normalized)
+        desired_role = ADMIN_ROLE_BY_EMAIL.get(normalized)
+        patch_name = desired_name and str(row.get("full_name", "")).strip() in {
+            "",
+            consultant_display_name(normalized),
+        }
+        patch_role = desired_role and str(row.get("role_title", "")).strip() in {"", DEFAULT_ADMIN_ROLE}
+        if not patch_name and not patch_role:
+            continue
+
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                UPDATE admin_user_profiles
+                SET full_name = ?, role_title = ?, updated_at = ?
+                WHERE email = ?
+                """,
+                (
+                    desired_name or str(row.get("full_name", "")).strip(),
+                    desired_role or str(row.get("role_title", "")).strip() or DEFAULT_ADMIN_ROLE,
+                    now_iso(),
+                    normalized,
+                ),
+            )
+
+
+def admin_profile_data(email: str) -> dict:
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return {
+            "email": "",
+            "full_name": "Consultor",
+            "role_title": DEFAULT_ADMIN_ROLE,
+            "updated_at": "",
+        }
+
+    seed_password = ADMIN_USERS.get(normalized, "123456")
+    row = ensure_admin_profile(normalized, seed_password)
+    if not row:
+        full_name, role_title = admin_profile_defaults(normalized)
+        return {
+            "email": normalized,
+            "full_name": full_name,
+            "role_title": role_title,
+            "updated_at": "",
+        }
+
+    return {
+        "email": normalized,
+        "full_name": str(row.get("full_name", consultant_display_name(normalized))),
+        "role_title": str(row.get("role_title", DEFAULT_ADMIN_ROLE)),
+        "updated_at": str(row.get("updated_at", "")),
+    }
+
+
+def update_admin_profile(email: str, *, full_name: str, role_title: str) -> tuple[dict, str]:
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return {}, "Sesion no valida"
+
+    clean_name = full_name.strip()
+    clean_role = role_title.strip()
+    if len(clean_name) < 3:
+        return {}, "El nombre debe tener al menos 3 caracteres"
+    if len(clean_role) < 2:
+        return {}, "El cargo debe tener al menos 2 caracteres"
+    if len(clean_name) > 120 or len(clean_role) > 80:
+        return {}, "Valores demasiado largos"
+
+    seed_password = ADMIN_USERS.get(normalized, "123456")
+    ensure_admin_profile(normalized, seed_password)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE admin_user_profiles
+            SET full_name = ?, role_title = ?, updated_at = ?
+            WHERE email = ?
+            """,
+            (clean_name, clean_role, now_iso(), normalized),
+        )
+
+    return admin_profile_data(normalized), ""
+
+
+def update_admin_password(email: str, *, new_password: str) -> str:
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return "Sesion no valida"
+
+    candidate = (new_password or "").strip()
+    if len(candidate) < 6:
+        return "La contrasena debe tener minimo 6 caracteres"
+
+    seed_password = ADMIN_USERS.get(normalized, "123456")
+    ensure_admin_profile(normalized, seed_password)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE admin_user_profiles
+            SET password_hash = ?, updated_at = ?
+            WHERE email = ?
+            """,
+            (hash_password(candidate), now_iso(), normalized),
+        )
+    return ""
+
+
+def profile_initials(full_name: str) -> str:
+    tokens = [chunk for chunk in re.split(r"\s+", (full_name or "").strip()) if chunk]
+    if not tokens:
+        return "GH"
+    if len(tokens) == 1:
+        return tokens[0][:2].upper()
+    return f"{tokens[0][0]}{tokens[1][0]}".upper()
 
 
 def option_index(question: dict, option: str) -> int:
@@ -2231,11 +2471,23 @@ def consultant_display_name(email: str) -> str:
 
 
 def credentials_valid(email: str, password: str) -> bool:
-    expected = ADMIN_USERS.get((email or "").strip().lower())
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return False
+
+    row = fetch_admin_profile_row(normalized)
+    if row and verify_password(password, str(row["password_hash"])):
+        return True
+
+    expected = ADMIN_USERS.get(normalized)
     if expected is None:
         return False
 
-    return hmac.compare_digest(password, expected)
+    if not hmac.compare_digest(password, str(expected)):
+        return False
+
+    ensure_admin_profile(normalized, str(expected))
+    return True
 
 
 def set_admin_cookie(handler: BaseHTTPRequestHandler, token: str) -> None:
@@ -3232,8 +3484,11 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
 
     module_slug = module_slug if module_slug in modules else "inside-scope"
     module_data = modules[module_slug]
-    user_name = consultant_display_name(user_email)
-    user_email_line = user_email.strip().lower() if user_email else ""
+    profile = admin_profile_data(user_email)
+    user_name = profile["full_name"]
+    user_role = profile["role_title"]
+    user_email_line = profile["email"] or (user_email.strip().lower() if user_email else "")
+    user_avatar = profile_initials(user_name)
     lead_rows, lead_stats = load_flash_leads_summary(limit=120)
 
     table_rows = []
@@ -3588,8 +3843,13 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
         {''.join(module_links)}
       </nav>
       <div class="workspace-user">
-        <p class="workspace-user-name">{esc(user_name)}</p>
-        <p class="workspace-user-email">{esc(user_email_line or 'consultor@globalhumancon.com')}</p>
+        <a class="workspace-profile-link" href="/app/profile">
+          <span class="workspace-profile-avatar">{esc(user_avatar)}</span>
+          <span class="workspace-profile-meta">
+            <span class="workspace-user-name">{esc(user_name)}</span>
+            <span class="workspace-user-role">{esc(user_role)}</span>
+          </span>
+        </a>
         <a class="workspace-logout" href="/admin/logout">Cerrar sesion</a>
       </div>
     </aside>
@@ -3614,6 +3874,234 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
     }}
   </script>
   {module_script}
+</body>
+</html>
+"""
+    return doc.encode("utf-8")
+
+
+def profile_app_view(user_email: str = "") -> bytes:
+    profile = admin_profile_data(user_email)
+    user_name = profile["full_name"]
+    user_role = profile["role_title"]
+    user_email_line = profile["email"] or (user_email.strip().lower() if user_email else "")
+    user_avatar = profile_initials(user_name)
+
+    modules = {
+        "inside-scope": "Inside Scope",
+        "lead-engine": "Lead Engine",
+    }
+    module_links = []
+    for slug, label in modules.items():
+        module_links.append(f'<a class="workspace-nav-item" href="/app/{esc(slug)}">{esc(label)}</a>')
+
+    profile_payload = json.dumps(
+        {
+            "email": profile["email"],
+            "full_name": profile["full_name"],
+            "role_title": profile["role_title"],
+        },
+        ensure_ascii=False,
+    )
+
+    doc = f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0D1B2A" />
+  <title>{esc(CONFIG['app_name'])} | Mi Perfil</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+</head>
+<body class="workspace-page">
+  <main class="workspace-shell">
+    <aside class="workspace-sidebar">
+      <div class="workspace-brand">
+        <p class="workspace-logo">GHC</p>
+        <p class="workspace-logo-sub">Market Intelligence</p>
+      </div>
+      <nav class="workspace-nav">
+        {''.join(module_links)}
+      </nav>
+      <div class="workspace-user">
+        <a class="workspace-profile-link is-active" href="/app/profile">
+          <span class="workspace-profile-avatar">{esc(user_avatar)}</span>
+          <span class="workspace-profile-meta">
+            <span class="workspace-user-name">{esc(user_name)}</span>
+            <span class="workspace-user-role">{esc(user_role)}</span>
+          </span>
+        </a>
+        <a class="workspace-logout" href="/admin/logout">Cerrar sesion</a>
+      </div>
+    </aside>
+
+    <section class="workspace-main workspace-main-profile">
+      <header class="workspace-head">
+        <div>
+          <h1>Mi Perfil</h1>
+          <p>Gestiona tus datos personales y credenciales de acceso.</p>
+        </div>
+      </header>
+
+      <section class="profile-card">
+        <div class="profile-tabs">
+          <button class="profile-tab is-active" data-tab-target="personal">Datos Personales</button>
+          <button class="profile-tab" data-tab-target="security">Seguridad</button>
+        </div>
+
+        <div class="profile-tab-panel is-active" id="tab-personal">
+          <label class="profile-label">Email corporativo</label>
+          <input class="profile-input profile-input-readonly" id="profileEmail" type="email" readonly />
+
+          <label class="profile-label">Nombre completo</label>
+          <input class="profile-input" id="profileFullName" type="text" />
+
+          <label class="profile-label">Puesto / Cargo</label>
+          <input class="profile-input" id="profileRoleTitle" type="text" />
+
+          <button class="profile-btn-primary" id="saveProfileBtn">Guardar Cambios</button>
+          <p class="profile-feedback is-hidden" id="profileDataFeedback"></p>
+
+          <section class="profile-connection">
+            <p class="profile-connection-title">Conexión Outlook (por usuario)</p>
+            <p class="profile-connection-line">Conectado como {esc(user_email_line or "usuario@globalhumancon.com")}</p>
+            <p class="profile-connection-meta">Token válido hasta 11/03/2026, 10:35:13</p>
+          </section>
+        </div>
+
+        <div class="profile-tab-panel" id="tab-security">
+          <div class="profile-security-note">
+            <h3>Cambiar Contraseña</h3>
+            <p>Establece una nueva contraseña segura para tu cuenta. No necesitas recibir un email.</p>
+          </div>
+
+          <label class="profile-label">Nueva contraseña</label>
+          <input class="profile-input" id="newPassword" type="password" placeholder="Mínimo 6 caracteres" />
+
+          <label class="profile-label">Confirmar nueva contraseña</label>
+          <input class="profile-input" id="confirmPassword" type="password" placeholder="Repite la contraseña" />
+
+          <button class="profile-btn-secondary" id="changePasswordBtn">Actualizar Contraseña</button>
+          <p class="profile-feedback is-hidden" id="profileSecurityFeedback"></p>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    window.PROFILE_INITIAL = {profile_payload};
+  </script>
+  <script>
+    (function () {{
+      const state = window.PROFILE_INITIAL || {{}};
+      const tabs = Array.from(document.querySelectorAll(".profile-tab"));
+      const panels = {{
+        personal: document.getElementById("tab-personal"),
+        security: document.getElementById("tab-security")
+      }};
+
+      const emailInput = document.getElementById("profileEmail");
+      const fullNameInput = document.getElementById("profileFullName");
+      const roleTitleInput = document.getElementById("profileRoleTitle");
+      const saveProfileBtn = document.getElementById("saveProfileBtn");
+      const profileDataFeedback = document.getElementById("profileDataFeedback");
+
+      const newPasswordInput = document.getElementById("newPassword");
+      const confirmPasswordInput = document.getElementById("confirmPassword");
+      const changePasswordBtn = document.getElementById("changePasswordBtn");
+      const profileSecurityFeedback = document.getElementById("profileSecurityFeedback");
+
+      function setFeedback(node, message, kind) {{
+        if (!node) return;
+        if (!message) {{
+          node.classList.add("is-hidden");
+          node.classList.remove("is-success", "is-error");
+          node.textContent = "";
+          return;
+        }}
+        node.textContent = message;
+        node.classList.remove("is-hidden", "is-success", "is-error");
+        node.classList.add(kind === "success" ? "is-success" : "is-error");
+      }}
+
+      function activateTab(tabId) {{
+        tabs.forEach((tab) => {{
+          const active = tab.dataset.tabTarget === tabId;
+          tab.classList.toggle("is-active", active);
+        }});
+        Object.entries(panels).forEach(([key, node]) => {{
+          if (!node) return;
+          node.classList.toggle("is-active", key === tabId);
+        }});
+        setFeedback(profileDataFeedback, "", "");
+        setFeedback(profileSecurityFeedback, "", "");
+      }}
+
+      tabs.forEach((tab) => {{
+        tab.addEventListener("click", () => activateTab(tab.dataset.tabTarget || "personal"));
+      }});
+
+      emailInput.value = state.email || "";
+      fullNameInput.value = state.full_name || "";
+      roleTitleInput.value = state.role_title || "";
+
+      saveProfileBtn.addEventListener("click", async () => {{
+        setFeedback(profileDataFeedback, "", "");
+        try {{
+          const response = await fetch("/api/admin/profile", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{
+              full_name: fullNameInput.value,
+              role_title: roleTitleInput.value
+            }})
+          }});
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "No se pudo actualizar");
+
+          fullNameInput.value = data.profile.full_name || fullNameInput.value;
+          roleTitleInput.value = data.profile.role_title || roleTitleInput.value;
+          setFeedback(profileDataFeedback, "Datos personales actualizados correctamente.", "success");
+        }} catch (error) {{
+          setFeedback(profileDataFeedback, error.message || "No se pudo actualizar", "error");
+        }}
+      }});
+
+      changePasswordBtn.addEventListener("click", async () => {{
+        setFeedback(profileSecurityFeedback, "", "");
+        const newPassword = newPasswordInput.value || "";
+        const confirmPassword = confirmPasswordInput.value || "";
+        if (newPassword.length < 6) {{
+          setFeedback(profileSecurityFeedback, "La contraseña debe tener mínimo 6 caracteres.", "error");
+          return;
+        }}
+        if (newPassword !== confirmPassword) {{
+          setFeedback(profileSecurityFeedback, "Las contraseñas no coinciden.", "error");
+          return;
+        }}
+
+        try {{
+          const response = await fetch("/api/admin/profile/password", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{
+              new_password: newPassword,
+              confirm_password: confirmPassword
+            }})
+          }});
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "No se pudo actualizar la contraseña");
+
+          newPasswordInput.value = "";
+          confirmPasswordInput.value = "";
+          setFeedback(profileSecurityFeedback, "Contraseña actualizada correctamente.", "success");
+        }} catch (error) {{
+          setFeedback(profileSecurityFeedback, error.message || "No se pudo actualizar la contraseña", "error");
+        }}
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -4140,6 +4628,14 @@ class AppHandler(BaseHTTPRequestHandler):
             html_response(self, interior_app_view(module_slug, current_admin_email(self)))
             return
 
+        if path == "/app/profile":
+            if not is_admin_authenticated(self):
+                redirect_response(self, "/login")
+                return
+
+            html_response(self, profile_app_view(current_admin_email(self)))
+            return
+
         if path == "/admin":
             if not is_admin_authenticated(self):
                 redirect_response(self, "/login")
@@ -4210,6 +4706,15 @@ class AppHandler(BaseHTTPRequestHandler):
                     }
                 )
             json_response(self, {"ok": True, "stats": stats, "rows": items}, 200)
+            return
+
+        if path == "/api/admin/profile":
+            if not is_admin_authenticated(self):
+                json_response(self, {"ok": False, "error": "No autenticado"}, 401)
+                return
+
+            profile = admin_profile_data(current_admin_email(self))
+            json_response(self, {"ok": True, "profile": profile}, 200)
             return
 
         if path == "/health":
@@ -4445,6 +4950,57 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             result, status = admin_create_flash_audit(payload)
             json_response(self, result, status)
+            return
+
+        if path == "/api/admin/profile":
+            if not is_admin_authenticated(self):
+                json_response(self, {"ok": False, "error": "No autenticado"}, 401)
+                return
+
+            payload, error = parse_json_body(self)
+            if error:
+                json_response(self, {"ok": False, "error": error}, 400)
+                return
+
+            full_name = str(payload.get("full_name", "")).strip()
+            role_title = str(payload.get("role_title", "")).strip()
+            profile, update_error = update_admin_profile(
+                current_admin_email(self),
+                full_name=full_name,
+                role_title=role_title,
+            )
+            if update_error:
+                json_response(self, {"ok": False, "error": update_error}, 400)
+                return
+
+            json_response(self, {"ok": True, "profile": profile}, 200)
+            return
+
+        if path == "/api/admin/profile/password":
+            if not is_admin_authenticated(self):
+                json_response(self, {"ok": False, "error": "No autenticado"}, 401)
+                return
+
+            payload, error = parse_json_body(self)
+            if error:
+                json_response(self, {"ok": False, "error": error}, 400)
+                return
+
+            new_password = str(payload.get("new_password", "")).strip()
+            confirm_password = str(payload.get("confirm_password", "")).strip()
+            if new_password != confirm_password:
+                json_response(self, {"ok": False, "error": "Las contrasenas no coinciden"}, 400)
+                return
+
+            password_error = update_admin_password(
+                current_admin_email(self),
+                new_password=new_password,
+            )
+            if password_error:
+                json_response(self, {"ok": False, "error": password_error}, 400)
+                return
+
+            json_response(self, {"ok": True}, 200)
             return
 
         if path == "/admin/login":

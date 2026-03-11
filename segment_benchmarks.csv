@@ -1,0 +1,13 @@
+facturacion_2024,tamano_empresa,sector,q4,q5,q6,q7,q8,q9,q10,sample_size
+<20 MEUR,10-49,Tecnologia,3-7 dias,11-25%,11-25%,1,6-10%,5-8 semanas,Pilotos activos,42
+20-50 MEUR,50-99,Tecnologia,3-7 dias,11-25%,11-25%,1,6-10%,5-8 semanas,Produccion parcial,57
+50-100 MEUR,100-250,Tecnologia,8-14 dias,11-25%,26-40%,2-3,11-25%,9-12 semanas,Produccion parcial,38
+100-250 MEUR,>250 personas,Tecnologia,8-14 dias,26-50%,26-40%,2-3,11-25%,9-12 semanas,En escala,29
+<20 MEUR,10-49,Servicios Profesionales,8-14 dias,26-50%,26-40%,2-3,11-25%,9-12 semanas,Pilotos activos,40
+20-50 MEUR,50-99,Servicios Profesionales,8-14 dias,26-50%,26-40%,2-3,11-25%,9-12 semanas,Pilotos activos,44
+50-100 MEUR,100-250,Industrial,8-14 dias,26-50%,26-40%,2-3,11-25%,9-12 semanas,Pilotos activos,36
+100-250 MEUR,>250 personas,Industrial,15-30 dias,26-50%,>40%,4 o mas,11-25%,13-16 semanas,Produccion parcial,33
+50-100 MEUR,100-250,Salud,8-14 dias,11-25%,26-40%,2-3,6-10%,9-12 semanas,Pilotos activos,28
+20-50 MEUR,50-99,Retail,8-14 dias,26-50%,26-40%,2-3,11-25%,9-12 semanas,Sin uso,35
+<20 MEUR,10-49,Automocion,8-14 dias,26-50%,26-40%,2-3,11-25%,9-12 semanas,Sin uso,21
+*,*,*,8-14 dias,11-25%,26-40%,2-3,11-25%,9-12 semanas,Pilotos activos,500

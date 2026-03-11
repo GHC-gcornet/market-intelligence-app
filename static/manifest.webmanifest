@@ -1,0 +1,10 @@
+{
+  "name": "Market Intelligence - Inside Scope",
+  "short_name": "Inside Scope",
+  "start_url": "/app/inside-scope",
+  "display": "standalone",
+  "background_color": "#FFFFFF",
+  "theme_color": "#0D1B2A",
+  "lang": "es",
+  "description": "Captura de market intelligence por audio o texto para consultores."
+}

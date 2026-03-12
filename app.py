@@ -522,6 +522,209 @@ def profile_initials(full_name: str) -> str:
     return f"{tokens[0][0]}{tokens[1][0]}".upper()
 
 
+def resolve_access_role(email: str, role_title: str) -> str:
+    normalized = (email or "").strip().lower()
+    if normalized == "gcornet@globalhumancon.com":
+        return "admin"
+
+    token = (role_title or "").strip().lower()
+    if "research" in token:
+        return "researcher"
+    if "admin" in token or "ceo" in token:
+        return "admin"
+    return "researcher"
+
+
+def route_matches(current_path: str, target_path: str, mode: str = "exact", exclude: list[str] | None = None) -> bool:
+    clean_current = (current_path or "").strip()
+    clean_target = (target_path or "").strip()
+    if not clean_target:
+        return False
+
+    excluded = exclude or []
+    for blocked in excluded:
+        if blocked and clean_current.startswith(blocked):
+            return False
+
+    if mode == "prefix":
+        return clean_current.startswith(clean_target)
+    return clean_current == clean_target
+
+
+def workspace_sidebar_html(
+    *,
+    current_path: str,
+    user_name: str,
+    user_role_title: str,
+    user_avatar: str,
+    profile_active: bool,
+    access_role: str,
+) -> str:
+    quick_action = None
+    if access_role != "researcher":
+        quick_action = {
+            "label": "Nuevo Benchmark",
+            "href": "/app/lead-engine#builder",
+            "active": route_matches(current_path, "/app/lead-engine", mode="prefix"),
+        }
+
+    sections = [
+        {
+            "title": "Plataforma",
+            "items": [
+                {
+                    "label": "Talent Insights",
+                    "href": "/app/inside-scope",
+                    "icon": "TI",
+                    "match": "prefix",
+                    "exclude": [],
+                },
+                {
+                    "label": "Market Benchmark",
+                    "href": "/app/lead-engine",
+                    "icon": "MB",
+                    "match": "prefix",
+                    "exclude": [],
+                },
+                {
+                    "label": "GAP Audit",
+                    "href": "/app/gap-audit",
+                    "icon": "GA",
+                    "match": "prefix",
+                    "exclude": [],
+                },
+            ],
+        },
+    ]
+
+    if access_role == "admin":
+        sections.append(
+            {
+                "title": "Administración",
+                "items": [
+                    {
+                        "label": "Leads CRM",
+                        "href": "/admin/leads",
+                        "icon": "LC",
+                        "match": "exact",
+                        "exclude": [],
+                    },
+                    {
+                        "label": "Panel Admin",
+                        "href": "/admin",
+                        "icon": "PA",
+                        "match": "exact",
+                        "exclude": ["/admin/leads", "/admin/response", "/admin/export.csv"],
+                    },
+                ],
+            }
+        )
+
+    quick_action_html = ""
+    if quick_action:
+        qa_active = " is-active" if quick_action["active"] else ""
+        quick_action_html = (
+            '<a class="workspace-quick-action{active}" href="{href}" data-tooltip="{tooltip}">'
+            '<span class="workspace-nav-icon">+</span>'
+            '<span class="workspace-nav-label">{label}</span>'
+            "</a>"
+        ).format(
+            active=qa_active,
+            href=esc(str(quick_action["href"])),
+            tooltip=esc(str(quick_action["label"])),
+            label=esc(str(quick_action["label"])),
+        )
+
+    sections_html: list[str] = []
+    for section in sections:
+        title = esc(str(section["title"]))
+        items_html = []
+        for item in section["items"]:
+            active = route_matches(
+                current_path=current_path,
+                target_path=str(item["href"]),
+                mode=str(item.get("match", "exact")),
+                exclude=list(item.get("exclude", [])),
+            )
+            active_class = " is-active" if active else ""
+            items_html.append(
+                '<a class="workspace-nav-item{active}" href="{href}" data-tooltip="{tooltip}">'
+                '<span class="workspace-nav-active-bar"></span>'
+                '<span class="workspace-nav-icon">{icon}</span>'
+                '<span class="workspace-nav-label">{label}</span>'
+                "</a>".format(
+                    active=active_class,
+                    href=esc(str(item["href"])),
+                    tooltip=esc(str(item["label"])),
+                    icon=esc(str(item["icon"])),
+                    label=esc(str(item["label"])),
+                )
+            )
+
+        sections_html.append(
+            '<section class="workspace-nav-section">'
+            '<p class="workspace-section-title"><span></span>{title}<span></span></p>'
+            '<div class="workspace-nav-items">{items}</div>'
+            "</section>".format(title=title, items="".join(items_html))
+        )
+
+    profile_active_class = " is-active" if profile_active else ""
+
+    return f"""
+    <aside class="workspace-sidebar">
+      <button class="workspace-collapse-btn" id="workspaceCollapseBtn" type="button" aria-label="Colapsar sidebar">‹</button>
+      <div class="workspace-brand">
+        <p class="workspace-logo">GHC</p>
+        <p class="workspace-logo-sub">Projects Ops</p>
+      </div>
+      <div class="workspace-nav-scroll">
+        {quick_action_html}
+        {''.join(sections_html)}
+      </div>
+      <div class="workspace-user">
+        <a class="workspace-profile-link{profile_active_class}" href="/app/profile" data-tooltip="Mi Perfil">
+          <span class="workspace-profile-avatar">{esc(user_avatar)}</span>
+          <span class="workspace-profile-meta">
+            <span class="workspace-user-name">{esc(user_name)}</span>
+            <span class="workspace-user-role">{esc(user_role_title)}</span>
+          </span>
+        </a>
+        <a class="workspace-logout" href="/admin/logout" data-tooltip="Cerrar Sesión">
+          <span class="workspace-nav-icon">⎋</span>
+          <span class="workspace-nav-label">Cerrar Sesión</span>
+        </a>
+      </div>
+    </aside>
+    """
+
+
+def workspace_sidebar_behavior_script() -> str:
+    return """
+  <script>
+    (function () {
+      const shell = document.querySelector(".workspace-shell");
+      const collapseBtn = document.getElementById("workspaceCollapseBtn");
+      if (!shell || !collapseBtn) return;
+
+      const storageKey = "ghc.sidebar.collapsed";
+      const applyState = (collapsed) => {
+        shell.classList.toggle("is-collapsed", !!collapsed);
+        collapseBtn.textContent = collapsed ? "›" : "‹";
+      };
+
+      const initial = window.localStorage.getItem(storageKey) === "1";
+      applyState(initial);
+
+      collapseBtn.addEventListener("click", function () {
+        const next = !shell.classList.contains("is-collapsed");
+        applyState(next);
+        window.localStorage.setItem(storageKey, next ? "1" : "0");
+      });
+    })();
+  </script>
+    """
+
+
 def option_index(question: dict, option: str) -> int:
     try:
         return question["options"].index(option) + 1
@@ -3696,7 +3899,7 @@ def login_view(error: str = "", email: str = "") -> bytes:
 def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
     modules = {
         "inside-scope": {
-            "label": "Inside Scope",
+            "label": "Talent Insights",
             "subtitle": "Captura de Market Intelligence cualitativa y salarial tras entrevistas con candidatos.",
             "kpis": {"pending": 3, "done": 3, "total": 6},
             "rows": [
@@ -3727,7 +3930,7 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
             ],
         },
         "lead-engine": {
-            "label": "Lead Engine",
+            "label": "Market Benchmark",
             "subtitle": "Pipeline comercial para captacion, calificacion y activacion de oportunidades.",
             "kpis": {"pending": 5, "done": 2, "total": 7},
             "rows": [
@@ -3757,6 +3960,12 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
                 },
             ],
         },
+        "gap-audit": {
+            "label": "GAP Audit",
+            "subtitle": "Módulo pendiente de configuración.",
+            "kpis": {"pending": 0, "done": 0, "total": 0},
+            "rows": [],
+        },
     }
 
     module_slug = module_slug if module_slug in modules else "inside-scope"
@@ -3766,6 +3975,16 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
     user_role = profile["role_title"]
     user_email_line = profile["email"] or (user_email.strip().lower() if user_email else "")
     user_avatar = profile_initials(user_name)
+    access_role = resolve_access_role(user_email_line, user_role)
+    current_path = f"/app/{module_slug}"
+    sidebar_html = workspace_sidebar_html(
+        current_path=current_path,
+        user_name=user_name,
+        user_role_title=user_role,
+        user_avatar=user_avatar,
+        profile_active=False,
+        access_role=access_role,
+    )
     lead_rows, lead_stats = load_flash_leads_summary(limit=120)
 
     table_rows = []
@@ -3810,13 +4029,6 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
                 </tr>
                 """
             )
-
-    module_links = []
-    for slug, info in modules.items():
-        active = " is-active" if slug == module_slug else ""
-        module_links.append(
-            f'<a class="workspace-nav-item{active}" href="/app/{esc(slug)}">{esc(info["label"])}</a>'
-        )
 
     lead_engine_content = f"""
       <section class="barometer-hub">
@@ -3933,6 +4145,14 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
             {''.join(table_rows) if table_rows else '<tr><td colspan="7">Sin leads registrados</td></tr>'}
           </tbody>
         </table>
+      </section>
+    """
+
+    gap_audit_content = """
+      <section class="panel">
+        <p class="step-tag">GAP Audit</p>
+        <h2>Módulo vacío por ahora</h2>
+        <p class="helper">Este espacio está creado en el sidebar y queda listo para su desarrollo funcional.</p>
       </section>
     """
 
@@ -4638,7 +4858,11 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
   </script>
     """
 
-    module_content = inside_scope_content if module_slug == "inside-scope" else lead_engine_content
+    module_content = gap_audit_content
+    if module_slug == "inside-scope":
+        module_content = inside_scope_content
+    elif module_slug == "lead-engine":
+        module_content = lead_engine_content
     module_script = ""
     if module_slug == "inside-scope":
         module_script = inside_scope_script
@@ -4658,25 +4882,7 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
 </head>
 <body class="workspace-page">
   <main class="workspace-shell">
-    <aside class="workspace-sidebar">
-      <div class="workspace-brand">
-        <p class="workspace-logo">GHC</p>
-        <p class="workspace-logo-sub">Market Intelligence</p>
-      </div>
-      <nav class="workspace-nav">
-        {''.join(module_links)}
-      </nav>
-      <div class="workspace-user">
-        <a class="workspace-profile-link" href="/app/profile">
-          <span class="workspace-profile-avatar">{esc(user_avatar)}</span>
-          <span class="workspace-profile-meta">
-            <span class="workspace-user-name">{esc(user_name)}</span>
-            <span class="workspace-user-role">{esc(user_role)}</span>
-          </span>
-        </a>
-        <a class="workspace-logout" href="/admin/logout">Cerrar sesion</a>
-      </div>
-    </aside>
+    {sidebar_html}
 
     <section class="workspace-main">
       <header class="workspace-head">
@@ -4697,6 +4903,7 @@ def interior_app_view(module_slug: str, user_email: str = "") -> bytes:
       }});
     }}
   </script>
+  {workspace_sidebar_behavior_script()}
   {module_script}
 </body>
 </html>
@@ -4710,14 +4917,15 @@ def profile_app_view(user_email: str = "") -> bytes:
     user_role = profile["role_title"]
     user_email_line = profile["email"] or (user_email.strip().lower() if user_email else "")
     user_avatar = profile_initials(user_name)
-
-    modules = {
-        "inside-scope": "Inside Scope",
-        "lead-engine": "Lead Engine",
-    }
-    module_links = []
-    for slug, label in modules.items():
-        module_links.append(f'<a class="workspace-nav-item" href="/app/{esc(slug)}">{esc(label)}</a>')
+    access_role = resolve_access_role(user_email_line, user_role)
+    sidebar_html = workspace_sidebar_html(
+        current_path="/app/profile",
+        user_name=user_name,
+        user_role_title=user_role,
+        user_avatar=user_avatar,
+        profile_active=True,
+        access_role=access_role,
+    )
 
     profile_payload = json.dumps(
         {
@@ -4740,25 +4948,7 @@ def profile_app_view(user_email: str = "") -> bytes:
 </head>
 <body class="workspace-page">
   <main class="workspace-shell">
-    <aside class="workspace-sidebar">
-      <div class="workspace-brand">
-        <p class="workspace-logo">GHC</p>
-        <p class="workspace-logo-sub">Market Intelligence</p>
-      </div>
-      <nav class="workspace-nav">
-        {''.join(module_links)}
-      </nav>
-      <div class="workspace-user">
-        <a class="workspace-profile-link is-active" href="/app/profile">
-          <span class="workspace-profile-avatar">{esc(user_avatar)}</span>
-          <span class="workspace-profile-meta">
-            <span class="workspace-user-name">{esc(user_name)}</span>
-            <span class="workspace-user-role">{esc(user_role)}</span>
-          </span>
-        </a>
-        <a class="workspace-logout" href="/admin/logout">Cerrar sesion</a>
-      </div>
-    </aside>
+    {sidebar_html}
 
     <section class="workspace-main workspace-main-profile">
       <header class="workspace-head">
@@ -4816,6 +5006,7 @@ def profile_app_view(user_email: str = "") -> bytes:
   <script>
     window.PROFILE_INITIAL = {profile_payload};
   </script>
+  {workspace_sidebar_behavior_script()}
   <script>
     (function () {{
       const state = window.PROFILE_INITIAL || {{}};
@@ -5443,7 +5634,7 @@ class AppHandler(BaseHTTPRequestHandler):
             redirect_response(self, "/app/inside-scope")
             return
 
-        if path in {"/app/inside-scope", "/app/lead-engine"}:
+        if path in {"/app/inside-scope", "/app/lead-engine", "/app/gap-audit"}:
             if not is_admin_authenticated(self):
                 redirect_response(self, "/login")
                 return
